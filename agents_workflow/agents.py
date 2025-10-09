@@ -1,10 +1,10 @@
 from typing import Any
 from strands import Agent
 from strands.types.agent import AgentInput
+from strands.tools.executors import ConcurrentToolExecutor
 from strands_tools import http_request
 import logging
 import time
-import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,6 +13,54 @@ logging.basicConfig(
     filemode="a",
 )
 log = logging.getLogger(__name__)
+
+
+class LoggingConcurrentToolExecutor(ConcurrentToolExecutor):
+    """Concurrent tool executor with detailed logging."""
+
+    async def _execute(
+        self, agent, tool_uses, tool_results, cycle_trace, cycle_span, invocation_state
+    ):
+        if tool_uses:
+            log.info(f"🔧 Executing {len(tool_uses)} tools in parallel:")
+            for i, tool_use in enumerate(tool_uses):
+                # Handle both dict and object formats
+                if hasattr(tool_use, "name"):
+                    name = tool_use.name
+                    input_data = getattr(tool_use, "input", "N/A")
+                elif isinstance(tool_use, dict):
+                    name = tool_use.get("name", "unknown")
+                    input_data = tool_use.get("input", "N/A")
+                else:
+                    name = str(tool_use)
+                    input_data = "N/A"
+                log.info(f"   Tool {i+1}: {name} - {input_data}")
+
+        start_time = time.time()
+        async for event in super()._execute(
+            agent, tool_uses, tool_results, cycle_trace, cycle_span, invocation_state
+        ):
+            yield event
+
+        if tool_uses:
+            execution_time = time.time() - start_time
+            log.info(
+                f"🔧 All {len(tool_uses)} tools completed in {execution_time:.1f}s"
+            )
+            for i, result in enumerate(tool_results):
+                if hasattr(result, "content") and result.content:
+                    content_preview = (
+                        str(result.content)[:100] + "..."
+                        if len(str(result.content)) > 100
+                        else str(result.content)
+                    )
+                    log.info(f"   Result {i+1}: {content_preview}")
+                elif isinstance(result, dict) and result.get("content"):
+                    content = str(result["content"])
+                    content_preview = (
+                        content[:100] + "..." if len(content) > 100 else content
+                    )
+                    log.info(f"   Result {i+1}: {content_preview}")
 
 
 from prompts import (
@@ -32,75 +80,19 @@ class LoggingAgent(Agent):
             if len(self.system_prompt) > 100
             else f"   System Prompt: {self.system_prompt}"
         )
-        log.info(
-            f"   Tools Available: {[tool.__name__ if hasattr(tool, '__name__') else str(tool) for tool in (self.tools or [])]}"
-        )
 
     def __call__(self, prompt: AgentInput = None, **kwargs: Any):
         start_time = time.time()
-        log.info(f"\n{'='*80}")
-        log.info(f"🚀 AGENT EXECUTION START: {self.agent_name}")
-        log.info(f"📝 INPUT PROMPT: {prompt}")
-        log.info(f"⚙️  KWARGS: {json.dumps(kwargs, indent=2, default=str)}")
+        log.info(f"🚀 {self.agent_name} Starting")
 
         try:
             result = super().__call__(prompt, **kwargs)
             execution_time = time.time() - start_time
-
-            log.info(f"✅ AGENT EXECUTION COMPLETE: {self.agent_name}")
-            log.info(f"⏱️  Execution Time: {execution_time:.2f} seconds")
-            log.info(
-                f"📤 FINAL RESULT: {str(result)[:500]}..."
-                if len(str(result)) > 500
-                else f"📤 FINAL RESULT: {result}"
-            )
-            log.info(f"{'='*80}\n")
-
+            log.info(f"✅ {self.agent_name} Complete ({execution_time:.1f}s)")
             return result
         except Exception as e:
             execution_time = time.time() - start_time
-            log.error(f"❌ AGENT EXECUTION FAILED: {self.agent_name}")
-            log.error(f"⏱️  Execution Time: {execution_time:.2f} seconds")
-            log.error(f"🚨 ERROR: {str(e)}")
-            log.error(f"{'='*80}\n")
-            raise
-
-    async def stream_async(self, prompt: AgentInput = None, **kwargs: Any):
-        start_time = time.time()
-        log.info(f"\n{'='*80}")
-        log.info(f"🚀 AGENT STREAMING START: {self.agent_name}")
-        log.info(f"📝 INPUT PROMPT: {prompt}")
-        log.info(f"⚙️  KWARGS: {json.dumps(kwargs, indent=2, default=str)}")
-
-        chunk_count = 0
-        full_response = ""
-
-        try:
-            async for chunk in super().stream_async(prompt, **kwargs):
-                chunk_count += 1
-                chunk_str = str(chunk)
-                full_response += chunk_str
-                log.info(f"📦 CHUNK {chunk_count}: {chunk_str}")
-                yield chunk
-
-            execution_time = time.time() - start_time
-            log.info(f"✅ AGENT STREAMING COMPLETE: {self.agent_name}")
-            log.info(f"⏱️  Execution Time: {execution_time:.2f} seconds")
-            log.info(f"📊 Total Chunks: {chunk_count}")
-            log.info(
-                f"📤 FULL RESPONSE: {full_response[:500]}..."
-                if len(full_response) > 500
-                else f"📤 FULL RESPONSE: {full_response}"
-            )
-            log.info(f"{'='*80}\n")
-
-        except Exception as e:
-            execution_time = time.time() - start_time
-            log.error(f"❌ AGENT STREAMING FAILED: {self.agent_name}")
-            log.error(f"⏱️  Execution Time: {execution_time:.2f} seconds")
-            log.error(f"📊 Chunks Processed: {chunk_count}")
-            log.error(f"🚨 ERROR: {str(e)}")
-            log.error(f"{'='*80}\n")
+            log.error(f"❌ {self.agent_name} Failed ({execution_time:.1f}s): {str(e)}")
             raise
 
 
@@ -108,6 +100,7 @@ researcher_agent = LoggingAgent(
     agent_name="RESEARCHER_AGENT",
     system_prompt=RESEARCH_AGENT_PROMPT,
     tools=[http_request],
+    tool_executor=LoggingConcurrentToolExecutor(),
 )
 analyst_agent = LoggingAgent(
     agent_name="ANALYST_AGENT", system_prompt=ANALYST_AGENT_PROMPT
